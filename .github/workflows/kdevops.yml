@@ -1,4 +1,4 @@
-name: kdevops-ci-radix-tree
+name: Run generic kdevops CI runner workflow
 
 on:
   push:
@@ -14,33 +14,60 @@ jobs:
     name: Run kdevops CI on Self-hosted Runner
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Configure git
         run: |
           git config --global --add safe.directory '*'
 
       - name: Checkout kdevops
         run: |
+          rm -rf kdevops
           git clone /mirror/kdevops.git kdevops
 
-      - name: Checkout custom branch with delta so on kdevops/linux
+      - name: Checkout custom branch with delta on kdevops/linux
         run: |
+          LINUX_TREE="https://github.com/${{ github.repository }}"
+          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
           cd kdevops
-          LINUX_TREE_REF=$([[ ${{ github.event_name }} == 'pull_request' ]] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          git clone https://github.com/${{ github.repository }} --reference /mirror/linux.git/ --depth=5 linux
+          git clone $LINUX_TREE --reference /mirror/linux.git/ --depth=5 linux
           cd linux
           git fetch origin $LINUX_TREE_REF
           git checkout $LINUX_TREE_REF
           git log -1
 
-      - name: Run kdevops make defconfig-seltests-kmod-cli
+      - name: Run a quick Linux kernel defconfig build test
         run: |
+          cd kdevops/linux
+          make defconfig
+          make -j$(nproc)
+
+      - name: Make sure our repo kdevops defconfig exists
+        run: |
+          KDEVOPS_DEFCONFIG=$(echo $(basename ${{ github.repository }}))
           cd kdevops
-          LINUX_TREE_REF=$([[ ${{ github.event_name }} == 'pull_request' ]] && echo "${{ github.event.pull_request.head.sha }}" || echo "${{ github.sha }}")
-          RAND_PREFIX="$(cat /dev/urandom | tr -dc 'a-z' | fold -w 5 | head -n 1)"
-          make KDEVOPS_HOSTS_PREFIX="$RAND_PREFIX" LINUX_TREE=https://github.com/${{ github.repository }} LINUX_TREE_REF=$LINUX_TREE_REF defconfig-seltests-radix-tree-cli
+          if [[ ! -f defconfigs/$KDEVOPS_DEFCONFIG ]]; then
+            echo "kdevops lacks a defconfig for this repository, expected to find: defconfigs/$KDEVOPS_DEFCONFIG"
+            exit 1
+          fi
+
+      - name: Run kdevops make defconfig-repo
+        run: |
+          LINUX_TREE="https://github.com/${{ github.repository }}"
+          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          KDEVOPS_DEFCONFIG=$(echo $(basename ${{ github.repository }}))
+          KDEVOPS_HOSTS_PREFIX="$(echo ${LINUX_TREE_REF:0:4})"
+          echo Going to use defconfig-$(basename ${{ github.repository }})
+
+          echo "Linux tree:          $LINUX_TREE"
+          echo "Linux ref:           $LINUX_TREE_REF"
+          echo "Runner ID:           ${{ github.run_id }}"
+          echo "kdevops host prefix: $KDEVOPS_HOSTS_PREFIX"
+
+          KDEVOPS_ARGS="KDEVOPS_HOSTS_PREFIX=$KDEVOPS_HOSTS_PREFIX LINUX_TREE=$LINUX_TREE LINUX_TREE_REF=$LINUX_TREE_REF defconfig-$KDEVOPS_DEFCONFIG"
+          echo Going to run:
+          echo make $KDEVOPS_ARGS
+
+          cd kdevops
+          make $KDEVOPS_ARGS
 
       - name: Run kdevops make
         run: |
@@ -53,26 +80,33 @@ jobs:
           ls -ld linux
           make bringup
 
-      - name: Run linux
+      - name: Build linux and boot test nodes on test kernel
         run: |
           cd kdevops
           make linux
 
-      - name: Run selftests
+      - name: Build required ci tests
         run: |
           cd kdevops
-          make selftests
+          make ci-build-test
 
-      - name: Run selftests
+      - name: Run CI tests
         run: |
           cd kdevops
-          make -j$(nproc) selftests-baseline
+          make ci-test
 
-      - name: Upload kdevops test results
+      - name: Get the defined CI test results directories for this repository
+        id: results-dirs
+        run: |
+          cd kdevops
+          make ci-results > results_dirs.txt
+
+      - name: Upload all defined test result directories as artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: selftest-results
-          path: workflows/selftests/results/
+          name: ci-results
+          path: |
+            $(cat kdevops/results_dirs.txt | tr '\n' ',')
 
       # Ensure make destroy always runs, even on failure
       - name: Run kdevops make destroy
@@ -80,3 +114,5 @@ jobs:
         run: |
           cd kdevops
           make destroy
+          cd ..
+          rm -rf kdevops
