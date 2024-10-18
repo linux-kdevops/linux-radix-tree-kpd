@@ -110,6 +110,7 @@ jobs:
           done
           sed -i 's|^|kdevops/|' results.txt
           cat results.txt
+          # XXX: hook to kdevops-results-archive
 
       - name: Read results.txt and set environment variable
         run: |
